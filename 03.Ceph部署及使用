@@ -13,23 +13,25 @@ Ceph对象网关是一个对象存储接口，建立在该对象之上， librad
 
 
 Ceph对象存储使用Ceph对象网关守护进程（`radosgw`），它是用于与Ceph存储群集进行交互的HTTP服务器。由于它提供与OpenStack Swift和Amazon S3兼容的接口，因此Ceph对象网关具有其自己的用户管理。
-Ceph对象网关可以将数据存储在用于存储来自Ceph文件系统客户端或Ceph块设备客户端的数据的同一Ceph存储群集中。S3和Swift API共享一个公共的名称空间，因此您可以使用一个API编写数据，而使用另一个API检索数据。
+Ceph对象网关可以将数据存储在用于存储来自Ceph文件系统客户端或Ceph块设备客户端的数据的同一Ceph存储群集中。
+S3和Swift API共享一个公共的名称空间，因此您可以使用一个API编写数据，而使用另一个API检索数据。
 
-![image-20200430151905835](assets/image-20200430151905835.png)
 
 ###### Ceph 文件系统
 
-Ceph 文件系统（ Ceph FS ）是个 POSIX 兼容的文件系统，它使用 Ceph 存储集群来存储数据。 Ceph 文件系统与 Ceph 块设备、同时提供 S3 和 Swift API 的 Ceph 对象存储、或者原生库（ librados ）一样，都使用着相同的 Ceph 存储集群系统。
+Ceph 文件系统（ Ceph FS ）是个 POSIX 兼容的文件系统，它使用 Ceph 存储集群来存储数据。
+Ceph 文件系统与 Ceph 块设备、同时提供 S3 和 Swift API 的 Ceph 对象存储、或者原生库（ librados ）一样，都使用着相同的 Ceph 存储集群系统。
 
 
 
 ###### CEPH 块存储
 
-块是一个字节序列（例如，一个 512 字节的数据块）。基于块的存储接口是最常见的存储数据方法，它们基于旋转介质，像硬盘、 CD 、软盘。无处不在的块设备接口使虚拟块设备成为与 Ceph 这样的海量存储系统交互的理想之选。
+块是一个字节序列（例如，一个 512 字节的数据块）。基于块的存储接口是最常见的存储数据方法，它们基于旋转介质，像硬盘、 CD 、软盘。
+无处不在的块设备接口使虚拟块设备成为与 Ceph 这样的海量存储系统交互的理想之选。
 
-Ceph 块设备是精简配置的、大小可调且将数据条带化存储到集群内的多个 OSD 。 Ceph 块设备利用 RADOS 的多种能力，如快照、复制和一致性。 Ceph 的 RADOS 块设备（ RBD ）使用内核模块或 librbd 库与 OSD 交互。
+Ceph 块设备是精简配置的、大小可调且将数据条带化存储到集群内的多个 OSD 。 
+Ceph 块设备利用 RADOS 的多种能力，如快照、复制和一致性。 Ceph 的 RADOS 块设备（ RBD ）使用内核模块或 librbd 库与 OSD 交互。
 
-![image-20200430194407343](assets/image-20200430194407343.png)
 
 ## 安装ceph集群
 
@@ -61,9 +63,6 @@ http://docs.ceph.com/docs/master
 cephu ALL=(root) NOPASSWD:ALL
 
 
-![image-20200427181932971](assets/image-20200427181932971.png)
-
-
 6.实现ssh无密码登录（admin节点操作）
 [root@admin ~]# su - cephu
 [cephu@admin ~]$ ssh-keygen
@@ -88,11 +87,11 @@ User cephu
 Host node3
 Hostname node3
 User cephu
-```
 
 
 
-```shell
+
+
 9.添加下载源，安装ceph-deploy（admin节点，root用户）
 [root@admin ~]# vim /etc/yum.repos.d/ceph.repo
 [ceph-noarch]
@@ -119,21 +118,18 @@ keepcache=1
 [root@admin ~]# vim /etc/ntp.conf  #有4行server的位置，把那4行server行注释掉，填写以下两行
 server 127.127.1.0 # local clock
 fudge  127.127.1.0 stratum 10
-```
 
-![image-20200427184923746](assets/image-20200427184923746.png)
 
-```shell
+
 [root@admin ~]# systemctl start ntpd
 [root@admin ~]# systemctl status ntpd
 其他所有节点：
 # yum install ntpdate  -y
 # ntpdate  时间服务器ip
-```
+
 
 ===============================================================
 
-```shell
 部署ceph集群
 #注意！！没有特别说明以下所有操作均是在admin节点，cephu用户下执行
 1.创建cephu操作的目录：
@@ -237,9 +233,9 @@ priority=1
 测试是否安装完成：分别在node1 node2 node3中确认安装版本为12.2.13    
 [cephu@node1 ~]$ ceph --version 
 ceph version 12.2.13 (584a20eb0237c657dc0567da126be145106aa47e) luminous (stable)
-```
 
-```shell
+
+
 4.初始化mon：admin节点--cephu用户执行
 [cephu@admin my-cluster]$ ceph-deploy mon create-initial
 
@@ -261,11 +257,10 @@ ceph version 12.2.13 (584a20eb0237c657dc0567da126be145106aa47e) luminous (stable
 最后通过如下命令查看集群状态：
 [cephu@admin my-cluster]$ ssh node1 sudo ceph -s
 如果显示health_ok，3个osd up就成功了
-```
 
-![image-20200502210158493](assets/image-20200502210158493.png)
 
-```shell
+
+
 Dashboard的配置：在node1上操作
 把ceph-mgr和ceph-mon安装在同一个主机上，最好只有一个ceph-mgr
 [root@node1 ~]# su - cephu
@@ -305,13 +300,14 @@ set mgr/dashboard/node1/server_addr
 
 5.web登录：浏览器地址栏输入：
  mgr地址:7000
-```
 
-![image-20200427203351189](assets/image-20200427203351189.png)
+
+
 
 到这里ceph分布式集群完成！
 
-```shell
+
+
 配置客户端使用
 
 配置客户端使用rbd：
@@ -445,11 +441,12 @@ rbd_default_features = 1
 [cephu@ceph-client ceph-block-device]$ sudo touch a.txt
 
 客户端重起之后，设备需要重新作映射，不然可能会卡死
-```
+
 
 ## 错误整理
 
-```shell
+
+
 [cephu@centos7u3_1 my-cluster]$ ceph-deploy new node1
 Traceback (most recent call last):
   File "/bin/ceph-deploy", line 18, in <module>
@@ -486,7 +483,8 @@ https://blog.csdn.net/zhydream77/article/details/81041767
 
 问题三:
 ceph-deploy mon create-initial  时候
-​```
+
+
 [node1][INFO  ] Running command: sudo ceph --cluster=ceph --admin-daemon /var/run/ceph/ceph-mon.node1.asok mon_status
 [node1][ERROR ] no valid command found; 10 closest matches:
 [node1][ERROR ] perf reset <var>
@@ -515,7 +513,8 @@ ceph-deploy mon create-initial  时候
 [node1][ERROR ] help
 [node1][ERROR ] admin_socket: invalid command
 [node1][WARNIN] monitor node1 does not exist in monmap
-​```
+
+
 
 原因： 第一次在做的时候没有修改主机名是就生成了公私钥，结果拷贝的公钥有问题，在问题二推送配置的时候，排查后发现主机名的问题。
 之后初始化mon的时候出错，排错两个小时，差点怀疑人生的时候突然发现，想起主机名的事情，就检查了以下公私钥，结果发现生成的公私钥是以原主机名生成的，删除后生成新的公私钥，传送公钥后，还是失败。
