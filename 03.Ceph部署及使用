@@ -1,0 +1,726 @@
+# ceph集群部署
+
+## ceph的存储方式
+
+###### radosgw：Ceph对象网关
+
+
+Ceph对象网关是一个对象存储接口，建立在该对象之上， librados为应用程序提供了通往Ceph存储集群的RESTful网关。Ceph对象存储支持两个接口：
+
+与S3兼容：为对象存储功能提供与Amazon S3 RESTful API的大部分子集兼容的接口。
+
+兼容Swift：通过与OpenStack Swift API的大部分子集兼容的接口，为对象存储功能提供支持。
+
+
+Ceph对象存储使用Ceph对象网关守护进程（`radosgw`），它是用于与Ceph存储群集进行交互的HTTP服务器。由于它提供与OpenStack Swift和Amazon S3兼容的接口，因此Ceph对象网关具有其自己的用户管理。
+Ceph对象网关可以将数据存储在用于存储来自Ceph文件系统客户端或Ceph块设备客户端的数据的同一Ceph存储群集中。S3和Swift API共享一个公共的名称空间，因此您可以使用一个API编写数据，而使用另一个API检索数据。
+
+![image-20200430151905835](assets/image-20200430151905835.png)
+
+###### Ceph 文件系统
+
+Ceph 文件系统（ Ceph FS ）是个 POSIX 兼容的文件系统，它使用 Ceph 存储集群来存储数据。 Ceph 文件系统与 Ceph 块设备、同时提供 S3 和 Swift API 的 Ceph 对象存储、或者原生库（ librados ）一样，都使用着相同的 Ceph 存储集群系统。
+
+
+
+###### CEPH 块存储
+
+块是一个字节序列（例如，一个 512 字节的数据块）。基于块的存储接口是最常见的存储数据方法，它们基于旋转介质，像硬盘、 CD 、软盘。无处不在的块设备接口使虚拟块设备成为与 Ceph 这样的海量存储系统交互的理想之选。
+
+Ceph 块设备是精简配置的、大小可调且将数据条带化存储到集群内的多个 OSD 。 Ceph 块设备利用 RADOS 的多种能力，如快照、复制和一致性。 Ceph 的 RADOS 块设备（ RBD ）使用内核模块或 librbd 库与 OSD 交互。
+
+![image-20200430194407343](assets/image-20200430194407343.png)
+
+## 安装ceph集群
+
+
+注意版本更新非常快，有问题看官方文档
+官方文档：
+http://docs.ceph.com/docs/master
+========================================
+准备环境
+系统版本：centos7.4 x86_64 server
+硬件配置：5台vm，1核1G内存，每台node角色的机器至少挂载1块不低于5个G的空闲盘为osd存储
+
+     主机名                 ip                         role
+    admin            192.168.153.130                 admin--安装ceph-deploy
+    node1            192.168.153.131                 mon / mgr / osd 
+    node2            192.168.153.132                 osd
+    node3            192.168.153.133                 osd
+    ceph-client      192.168.153.134
+    
+1.给三台node节点添加一块大小5G以上的磁盘。
+2.所有节点修改主机名并相互解析
+3.关闭所有机器的防火墙和selinux
+4.所有节点创建普通用户并设置密码--所有节点都操作
+[root@admin ~]# useradd cephu
+[root@admin ~]# passwd cephu
+
+5.确保各 Ceph 节点上新创建的用户都有 sudo 权限--所有节点操作
+[root@admin ~]# visudo  ----在root ALL=(ALL) ALL下面添加：
+cephu ALL=(root) NOPASSWD:ALL
+
+
+![image-20200427181932971](assets/image-20200427181932971.png)
+
+
+6.实现ssh无密码登录（admin节点操作）
+[root@admin ~]# su - cephu
+[cephu@admin ~]$ ssh-keygen
+
+7.将admin节点cephu用户生成的密钥拷贝到各Ceph节点：
+[cephu@admin ~]$ ssh-copy-id cephu@node1
+[cephu@admin ~]$ ssh-copy-id cephu@node2
+[cephu@admin ~]$ ssh-copy-id cephu@node3
+[cephu@admin ~]$ ssh-copy-id cephu@ceph-client
+
+8.在admin节点用root用户添加~/.ssh/config配置文件，并进行如下设置，这样 ceph-deploy 就能用你所建的用户名登录 Ceph 节点了
+[root@admin ~]# mkdir ~/.ssh
+[root@admin ~]# vim ~/.ssh/config
+Host node1
+Hostname node1
+User cephu
+
+Host node2
+Hostname node2
+User cephu
+
+Host node3
+Hostname node3
+User cephu
+```
+
+
+
+```shell
+9.添加下载源，安装ceph-deploy（admin节点，root用户）
+[root@admin ~]# vim /etc/yum.repos.d/ceph.repo
+[ceph-noarch]
+name=Ceph noarch packages
+baseurl=https://download.ceph.com/rpm-luminous/el7/noarch
+enabled=1
+gpgcheck=1
+type=rpm-md
+gpgkey=https://download.ceph.com/keys/release.asc
+
+更新源，安装ceph-deploy：
+[root@admin ~]# yum makecache
+[root@admin ~]# yum update
+开启yum缓存
+[root@admin ~]# vim /etc/yum.conf
+keepcache=1
+安装
+[root@admin ~]# yum install ceph-deploy -y
+
+10.安装ntp（所有节点）
+#注意！！选择任何一台机器当ntp时间服务器，其他的节点当时间服务器的客户端跟服务器同步时间
+我选择的是admin上:
+[root@admin ~]# yum install -y ntp
+[root@admin ~]# vim /etc/ntp.conf  #有4行server的位置，把那4行server行注释掉，填写以下两行
+server 127.127.1.0 # local clock
+fudge  127.127.1.0 stratum 10
+```
+
+![image-20200427184923746](assets/image-20200427184923746.png)
+
+```shell
+[root@admin ~]# systemctl start ntpd
+[root@admin ~]# systemctl status ntpd
+其他所有节点：
+# yum install ntpdate  -y
+# ntpdate  时间服务器ip
+```
+
+===============================================================
+
+```shell
+部署ceph集群
+#注意！！没有特别说明以下所有操作均是在admin节点，cephu用户下执行
+1.创建cephu操作的目录：
+[root@qfedu.com-admin ~]# su - cephu
+[cephu@admin ~]$ mkdir my-cluster   #之后，所有ceph-deploy命令操作必须在该目录下执行
+
+2.创建集群---这里报错查看后面的错误整理
+首先在这里需要先下载一个包并安装否则会报错，然后在创建集群
+[cephu@admin ~]$ wget https://files.pythonhosted.org/packages/5f/ad/1fde06877a8d7d5c9b60eff7de2d452f639916ae1d48f0b8f97bf97e570a/distribute-0.7.3.zip
+[cephu@admin ~]$ unzip distribute-0.7.3.zip
+[cephu@admin ~]$ cd distribute-0.7.3
+[cephu@admin distribute-0.7.3]$ sudo python setup.py install
+创建集群
+[cephu@admin ~]$ cd my-cluster/
+[cephu@admin my-cluster]$ ceph-deploy new node1
+[cephu@qfedu.com-admin my-cluster]$ ls
+ceph.conf  ceph-deploy-ceph.log  ceph.mon.keyring
+创建成功会有三个文件：ceph.conf, ceph.mon.keyring, and a log file
+
+3.安装luminous-12.2.13在(脚本方式在admin节点)
+目标：在node1,node2,node3三个节点上安装ceph和ceph-radosgw主包
+方法1：利用官方脚本全自动安装
+#脚本会帮助node1,node2,node3创建epel源和ceph源，并且自动安装ceph和ceph-radosgw主包
+[cephu@admin my-cluster]$ ceph-deploy install --release luminous node1 node2 node3
+#这一步时间很长，容易超时，可以利用手动安装
+
+如果ceph和ceph-radosgw安装不上，则采用方法2
+在千锋做实验要注意epel的源(切记)
+测试是否安装完成：分别在node1 node2 node3中确认安装版本为12.2.13
+ [cephu@node1 ~]$ ceph --version 
+ceph version 12.2.13 (584a20eb0237c657dc0567da126be145106aa47e) luminous (stable)
+
+
+方法2：手动部署安装三台机器分别创建：三台node节点相同操作
+    1）安装epel源
+    # yum install -y epel*
+    2）创建Ceph源，内容如下：官方源
+    # vim /etc/yum.repos.d/ceph.repo
+[Ceph]
+name=Ceph packages for $basearch
+baseurl=http://download.ceph.com/rpm-luminous/el7/$basearch
+enabled=1
+gpgcheck=1
+type=rpm-md
+gpgkey=https://download.ceph.com/keys/release.asc
+priority=1
+
+[Ceph-noarch]
+name=Ceph noarch packages
+baseurl=http://download.ceph.com/rpm-luminous/el7/noarch
+enabled=1
+gpgcheck=1
+type=rpm-md
+gpgkey=https://download.ceph.com/keys/release.asc
+priority=1
+
+[ceph-source]
+name=Ceph source packages
+baseurl=http://download.ceph.com/rpm-luminous/el7/SRPMS
+enabled=1
+gpgcheck=1
+type=rpm-md
+gpgkey=https://download.ceph.com/keys/release.asc
+priority=1
+
+#下面的是阿里云的ceph源
+# vim /etc/yum.repos.d/ceph.repo
+[Ceph]
+name=Ceph packages for $basearch
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/$basearch
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+[Ceph-noarch]
+name=Ceph noarch packages
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/noarch
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+[ceph-source]
+name=Ceph source packages
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/SRPMS
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+    3)分别在node1，node2，node3节点执行下面命令安装软件,可以完全手动安装，但需要yum的ceph缓存目录结构
+    $sudo yum install ceph ceph-radosgw  -y    
+    如果因为速度慢导致安装失败可以按ctrl+c，利用它创建的yum缓存目录，手动把安装包下载下来保存到缓存目录/var/cache/yum/x86_64/Ceph/packages目录下
+    再次执行安装命令：
+    $sudo yum install ceph ceph-radosgw  -y
+
+测试是否安装完成：分别在node1 node2 node3中确认安装版本为12.2.13    
+[cephu@node1 ~]$ ceph --version 
+ceph version 12.2.13 (584a20eb0237c657dc0567da126be145106aa47e) luminous (stable)
+```
+
+```shell
+4.初始化mon：admin节点--cephu用户执行
+[cephu@admin my-cluster]$ ceph-deploy mon create-initial
+
+5.赋予各个节点使用命令免用户名权限：
+[cephu@admin my-cluster]$ ceph-deploy admin node1 node2 node3
+
+6.安装ceph-mgr：只有luminous才有，为使用dashboard做准备
+[cephu@admin my-cluster]$ ceph-deploy mgr create node1
+
+7.添加osd：
+注意：各个节点上提供存储空间的磁盘大小不能太小，最好5G以上，注意检查你的磁盘名字
+[cephu@admin my-cluster]$ ceph-deploy osd create --data /dev/sdb node1
+[cephu@admin my-cluster]$ ceph-deploy osd create --data /dev/sdb node2
+[cephu@admin my-cluster]$ ceph-deploy osd create --data /dev/sdb node3
+命令中/dev/sdb是在各个节点上为osd准备的空闲磁盘（无需分区格式化，如果有分区需要指定具体分区），通过如下命令查看：
+[cephu@admin my-cluster]$ ssh node1 lsblk -f
+
+
+最后通过如下命令查看集群状态：
+[cephu@admin my-cluster]$ ssh node1 sudo ceph -s
+如果显示health_ok，3个osd up就成功了
+```
+
+![image-20200502210158493](assets/image-20200502210158493.png)
+
+```shell
+Dashboard的配置：在node1上操作
+把ceph-mgr和ceph-mon安装在同一个主机上，最好只有一个ceph-mgr
+[root@node1 ~]# su - cephu
+
+1.创建管理域秘钥：
+[cephu@node1 ~]$ sudo ceph auth get-or-create mgr.node1 mon 'allow profile mgr' osd 'allow *' mds 'allow *'
+[mgr.node1]
+	key = AQAePadeYsvJLxAA9Pnmib3S+0Kj1jAeuSQcKw==
+
+2.开启 ceph-mgr 管理域
+[cephu@node1 ~]$ sudo ceph-mgr -i node1
+
+3.查看ceph的状态：确认mgr的状态为active
+[cephu@node1 ~]$ sudo ceph status
+  cluster:
+    id:     aec06bc6-428c-49ff-a2c1-2d84808bcb54
+    health: HEALTH_OK
+ 
+  services:
+    mon: 1 daemons, quorum node1
+    mgr: node1(active, starting)
+    osd: 3 osds: 3 up, 3 in
+ 
+  data:
+    pools:   0 pools, 0 pgs
+    objects: 0 objects, 0B
+    usage:   3.01GiB used, 12.0GiB / 15.0GiB avail
+    pgs:
+    
+4.打开dashboard模块：
+[cephu@node1 ~]$ sudo ceph mgr module enable dashboard
+
+5.绑定开启dashboard模块的ceph-mgr节点的ip地址：
+[cephu@node1 ~]$ sudo ceph config-key set mgr/dashboard/node1/server_addr 192.168.153.136
+set mgr/dashboard/node1/server_addr
+# ip地址为mgr节点的ip地址,也就是node1的ip地址
+
+5.web登录：浏览器地址栏输入：
+ mgr地址:7000
+```
+
+![image-20200427203351189](assets/image-20200427203351189.png)
+
+到这里ceph分布式集群完成！
+
+```shell
+配置客户端使用
+
+配置客户端使用rbd：
+# 创建块设备之前需要创建存储池，存储池相关命令需要在mon节点执行--也就是规划好的node1节点
+
+1.创建存储池：
+[cephu@node1 ~]$ sudo ceph osd pool create rbd 128 128
+pool 'rbd' created
+
+2.初始化存储池
+[cephu@node1 ~]$ sudo rbd pool init rbd
+
+3.准备客户端client：客户端操作
+#另备一台主机，系统centos7用来作为client。主机名为client，ip：192.168.153.135。修改hosts文件实现和admin节点的主机名互通。
+
+3.1.升级client内核到4.x,方法在子目录中
+Centos7升级内核
+更新前，内核版本为：
+[root@ceph-client ~]# uname -r 
+3.10.0-693.el7.x86_64
+升级方法:导入key:  
+[root@ceph-client ~]# rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+
+3.2.安装elrepo的yum源:
+[root@ceph-client ~]# rpm -Uvh http://www.elrepo.org/elrepo-release-7.0-2.el7.elrepo.noarch.rpm
+
+查看可用的系统内核包
+[root@ceph-client ~]# yum --disablerepo="*" --enablerepo="elrepo-kernel" list available
+
+3.3安装内核: 当前内核为最新5.6，也可以安装4版本的内核
+[root@ceph-client ~]# yum --enablerepo=elrepo-kernel install  kernel-ml-devel kernel-ml -y
+#当前为5.6.7版本
+Dependencies Resolved
+
+===============================================================================================================================
+ Package                         Arch                   Version                            Repository                     Size
+===============================================================================================================================
+Installing:
+ kernel-ml                       x86_64                 5.6.7-1.el7.elrepo                 elrepo-kernel                  49 M
+ kernel-ml-devel                 x86_64                 5.6.7-1.el7.elrepo                 elrepo-kernel                  13 M
+
+Transaction Summary
+===============================================================================================================================
+Install  2 Packages
+
+
+查看内核默认启动顺序
+[root@ceph-client ~]# awk -F\' '$1=="menuentry " {print $2}' /etc/grub2.cfg 
+CentOS Linux (5.6.7-1.el7.elrepo.x86_64) 7 (Core)
+CentOS Linux (3.10.0-693.el7.x86_64) 7 (Core)
+CentOS Linux (0-rescue-8c5f0e6efaf047c5a0b72fdd72ee6575) 7 (Core)
+
+默认启动的顺序是从0开始，新内核是从头插入（目前位置在0，而5.6.7的是在1），所以需要选择0。
+[root@ceph-client ~]# grub2-set-default 0
+
+然后reboot重启，使用新的内核，下面是重启后使用的内核版本:
+[root@ceph-client ~]# reboot
+[root@ceph-client ~]# uname -r 
+5.6.7-1.el7.elrepo.x86_64
+
+4.删除旧的内核
+[root@ceph-client ~]# yum remove kernel -y
+
+5.为client安装ceph：
+[root@ceph-client ~]# yum  -y install python-setuptools  #还要做着一步 否则报错
+5.1.参考部署ceph文档开头环境准备的2-5步
+5.2.参考部署ceph集群中的第3步--安装安装luminous-12.2.13的第2中方式手动安装ceph
+5.2.1.安装epel源
+[root@ceph-client ~]# yum install -y epel*
+5.2.2。创建ceph源
+[root@ceph-client ~]# vim /etc/yum.repos.d/ceph.repo
+[Ceph]
+name=Ceph packages for $basearch
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/$basearch
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+[Ceph-noarch]
+name=Ceph noarch packages
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/noarch
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+[ceph-source]
+name=Ceph source packages
+baseurl=http://mirrors.aliyun.com/ceph/rpm-luminous/el7/SRPMS
+enabled=1
+gpgcheck=0
+type=rpm-md
+gpgkey=https://mirrors.aliyun.com/ceph/keys/release.asc
+priority=1
+
+[root@ceph-client ~]# vim /etc/yum.conf  #开启yum缓存
+keepcache=1
+[root@ceph-client ~]# yum clean all
+[root@ceph-client ~]# su - cephu
+[cephu@ceph-client ~]$ sudo yum install ceph ceph-radosgw  -y
+[cephu@ceph-client ~]$ ceph --version
+ceph version 12.2.13 (584a20eb0237c657dc0567da126be145106aa47e) luminous (stable)
+
+6.在admin节点赋予client使用命令免用户名权限：
+[cephu@admin my-cluster]$ ceph-deploy admin ceph-client
+
+7.修改client下该文件的读权限：
+[cephu@ceph-client ~]$ sudo chmod +r /etc/ceph/ceph.client.admin.keyring
+
+8.修改client下的ceph配置文件：这一步是为了解决映射镜像时出错问题
+[cephu@ceph-client ~]$ sudo vi /etc/ceph/ceph.conf #在global section下添加：
+rbd_default_features = 1
+
+9.client节点创建块设备镜像：单位是M，这里是4个G
+[cephu@ceph-client ~]$ rbd create foo --size 4096
+
+10.client节点映射镜像到主机：
+[cephu@ceph-client ~]$ sudo rbd map foo --name client.admin
+/dev/rbd0
+
+11.client节点格式化块设备：
+[cephu@ceph-client ~]$ sudo mkfs.ext4 -m 0 /dev/rbd/rbd/foo
+
+12.client节点mount块设备：
+[cephu@ceph-client ~]$ sudo mkdir /mnt/ceph-block-device #创建挂载点
+[cephu@ceph-client ~]$ sudo mount /dev/rbd/rbd/foo /mnt/ceph-block-device #挂载
+[cephu@ceph-client ~]$ cd /mnt/ceph-block-device
+[cephu@ceph-client ceph-block-device]$ sudo touch a.txt
+
+客户端重起之后，设备需要重新作映射，不然可能会卡死
+```
+
+## 错误整理
+
+```shell
+[cephu@centos7u3_1 my-cluster]$ ceph-deploy new node1
+Traceback (most recent call last):
+  File "/bin/ceph-deploy", line 18, in <module>
+    from ceph_deploy.cli import main
+  File "/usr/lib/python2.7/site-packages/ceph_deploy/cli.py", line 1, in <module>
+    import pkg_resources
+ImportError: No module named pkg_resources
+
+
+
+重新安装python的distribution：
+
+下载 distribution : https://pypi.python.org/pypi/distribute
+cd distribution-0.7.3/
+sudo python setup.py install
+
+distribution下载地址：
+https://files.pythonhosted.org/packages/5f/ad/1fde06877a8d7d5c9b60eff7de2d452f639916ae1d48f0b8f97bf97e570a/distribute-0.7.3.zip
+
+
+
+问题二
+[ERROR ] admin_socket: exception getting command descriptions: [Errno 2] No such file or dir
+
+cat /etc/ceph/ceph.conf
+添加
+public_network= 192.168.122.0/24
+推送
+ceph-deploy --overwrite-conf config push admin node1 node2 node3
+
+https://www.cnblogs.com/aguncn/p/7352393.html 
+https://blog.csdn.net/zhydream77/article/details/81041767
+
+
+问题三:
+ceph-deploy mon create-initial  时候
+​```
+[node1][INFO  ] Running command: sudo ceph --cluster=ceph --admin-daemon /var/run/ceph/ceph-mon.node1.asok mon_status
+[node1][ERROR ] no valid command found; 10 closest matches:
+[node1][ERROR ] perf reset <var>
+[node1][ERROR ] perf histogram schema
+[node1][ERROR ] log reopen
+[node1][ERROR ] log flush
+[node1][ERROR ] perf histogram dump {<logger>} {<counter>}
+[node1][ERROR ] perf dump {<logger>} {<counter>}
+[node1][ERROR ] git_version
+[node1][ERROR ] get_command_descriptions
+[node1][ERROR ] log dump
+[node1][ERROR ] help
+[node1][ERROR ] admin_socket: invalid command
+[node1][WARNIN] monitor: mon.node1, might not be running yet
+[node1][INFO  ] Running command: sudo ceph --cluster=ceph --admin-daemon /var/run/ceph/ceph-mon.node1.asok mon_status
+[node1][ERROR ] no valid command found; 10 closest matches:
+[node1][ERROR ] perf reset <var>
+[node1][ERROR ] perf histogram schema
+[node1][ERROR ] log reopen
+[node1][ERROR ] log flush
+[node1][ERROR ] perf histogram dump {<logger>} {<counter>}
+[node1][ERROR ] perf dump {<logger>} {<counter>}
+[node1][ERROR ] git_version
+[node1][ERROR ] get_command_descriptions
+[node1][ERROR ] log dump
+[node1][ERROR ] help
+[node1][ERROR ] admin_socket: invalid command
+[node1][WARNIN] monitor node1 does not exist in monmap
+​```
+
+原因： 第一次在做的时候没有修改主机名是就生成了公私钥，结果拷贝的公钥有问题，在问题二推送配置的时候，排查后发现主机名的问题。
+之后初始化mon的时候出错，排错两个小时，差点怀疑人生的时候突然发现，想起主机名的事情，就检查了以下公私钥，结果发现生成的公私钥是以原主机名生成的，删除后生成新的公私钥，传送公钥后，还是失败。
+但是感觉已经找到了问题所在，继续排查，到node1查看日志发现，地址被占用，平复以下自己激动的心，然后冷静的杀掉进程，重新初始化OK
+
+
+问题四：
+ceph-deploy osd create --data /dev/vdc node3
+[node1][WARNIN] ceph-volume lvm create: error: GPT headers found, they must be removed on: /dev/vdb
+[node1][ERROR ] RuntimeError: command returned non-zero exit status: 2
+[ceph_deploy.osd][ERROR ] Failed to execute command: /usr/sbin/ceph-volume --cluster ceph lvm create --bluestore --data /dev/vdb
+[ceph_deploy][ERROR ] GenericError: Failed to create 1 OSDs
+
+
+千万不要分区，然后重新加磁盘，重新做
+又文档说加上参数也可以但是
+ceph-deploy osd create --data /dev/vdc  --fs-type xfs node3 不行
+
+
+
+[cephu@node1 ~]$ sudo ceph auth get-or-create mgr.node1 mon 'allow profile mgr' osd 'allow *' mds 'allow *'
+[mgr.node1]
+        key = AQD8HPdcmntqJRAAlZ3Aeialqq0nVcdcg+axqQ==
+
+
+
+
+
+-------------
+问题:rdb map出错rbd sysfs write failed
+创建了一个rbd镜像
+    $ rbd create --size 4096 docker_test
+然后，在Ceph client端将该rbd镜像映射为本地设备时出错。
+    $ rbd map docker_test --name client.admin
+
+    rbd: sysfs write failed
+    RBD image feature set mismatch. You can disable features unsupported by the kernel with "rbd feature disable".
+    In some cases useful info is found in syslog - try "dmesg | tail" or so.
+
+原因：
+     rbd镜像的一些特性，OS kernel并不支持，所以映射失败。我们查看下该镜像支持了哪些特性。
+    $ rbd info docker_test
+
+    rbd image 'docker_test':
+        size 4096 MB in 1024 objects
+        order 22 (4096 kB objects)
+        block_name_prefix: rbd_data.43702ae8944a
+        format: 2
+        features: layering, exclusive-lock, object-map, fast-diff, deep-flatten
+        flags: 
+    可以看到特性feature一栏，由于我OS的kernel只支持layering，其他都不支持，所以需要把部分不支持的特性disable掉。
+
+方法一： 直接diable这个rbd镜像的不支持的特性：
+    $ rbd feature disable docker_test exclusive-lock object-map fast-diff deep-flatten
+
+方法二： 创建rbd镜像时就指明需要的特性，如：
+    $ rbd create --size 4096 docker_test --image-feature layering
+    
+方法三： 如果还想一劳永逸
+那么就在执行创建rbd镜像命令的服务器中，
+修改Ceph配置文件/etc/ceph/ceph.conf，
+在global section下，增加rbd_default_features = 1
+再创建rdb镜像。
+    $ rbd create --size 4096 docker_test
+
+通过上述三种方法后，查看rbd镜像的信息。
+    $ rbd info docker_test
+
+    rbd image 'docker_test':
+        size 4096 MB in 1024 objects
+        order 22 (4096 kB objects)
+        block_name_prefix: rbd_data.43a22ae8944a
+        format: 2
+        features: layering
+        flags:
+
+再次尝试映射rdb镜像到本地块设备，成功！
+    $ rbd map docker_test --name client.admin  
+    /dev/rbd0
+======================================
+问题:
+[cephu@client ~]$ sudo  rbd map docker_test --name client.admin
+
+
+rbd: sysfs write failed
+In some cases useful info is found in syslog - try "dmesg | tail".
+rbd: map failed: (110) Connection timed out
+
+解决方案:
+[cephu@client ~]$ sudo ceph osd crush tunables hammer
+adjusted tunables profile to hammer
+
+然后重新 
+[cephu@client ~]$ sudo  rbd map docker_test --name client.admin
+/dev/rbd0
+
+成功
+
+参考链接: https://randomopenstackthoughts.wordpress.com/2018/08/16/ceph-block-device/
+=====================================
+
+问题1:
+2.3步骤中,如果由于网速太慢,可以如下操作
+由于网速慢的问题，安装并不会成功。之所以仍进行这一步，只因执行过了该命令就会自动创建相应文件夹。在进入各个节点手动安装的时候，才能把下载的不成功的包放到正确的目录下，这样，手动安装使用yum命令才会成功。之后进入每个节点执行安装。
+以node1为例：
+• 先从https://download.ceph.com/rpm-luminous/el7/x86_64/ 下载所有最有最新版本的rpm包到本地
+
+• 之后使用secure shell client上传到node1的/var/cache/yum/x86_64/7/Ceph/packages/文件夹下
+
+• 然后安装ceph：
+$ ssh node1
+$ sudo yum install –y epel-release ceph ceph-radosgw
+虽然所有安装包都在相应的目录中了，但仍可能不成功，这个时候只需要再次重新把安装包放到对应目录后再执行该命令就成功了，原因不明。
+======================================
+问题2:
+2.3步骤中如果开启防火墙需要做如下操作
+设置防火墙（由于node1既是mon节点又是osd节点，所以要添加下面两个规则。其他节点只开启ceph服务即可）：
+$ sudo firewall-cmd --zone=public --add-service=ceph-mon --permanent  //该规则仅在mon节点执行，如果不添加就不能在其他osd上进行一些查询操作
+$ sudo firewall-cmd --zone=public --add-service=ceph --permanent
+$ sudo firewall-cmd --reload
+注意:该防火墙规则只能在安装成功ceph后才能添加，否则就不识别，添加失败。最后退出node1节点，返回admin节点
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+问题3：
+激活 OSD 的时候需要先把OSD所在服务器的目录所有者和所属组手动改成ceph，不然无法激活
+[root@vm42 yum.repos.d]# chown ceph:ceph /var/local/osd2
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+问题4：
+ceph:health_warn clock skew detected on mon的解决办法
+造成集群状态health_warn：clock skew detected on mon节点的原因有两个，一个是mon节点上ntp服务器未启动，另一个是ceph设置的mon的时间偏差阈值比较小。
+ 排查时也应遵循先第一个原因，后第二个原因的方式。
+
+第一步：确认ntp服务是否正常工作
+
+第二步：修改ceph配置中的时间偏差阈值
+1. 在admin部署节点修改配置参数：
+# vi ~/my-cluster/ceph.conf在global字段下添加：
+mon clock drift allowed = 2
+mon clock drift warn backoff = 30    
+
+2. 向需要同步的mon节点推送配置文件：
+# ceph-deploy --overwrite-conf config push node{1..3}这里是向node1 node2 node3推送，也可以后跟其它不联系节点
+ 3. 重启mon服务（centos7环境下）
+# systemctl restart ceph-mon.target4.验证：
+# ceph -s显示health_ok说明问题解决
+
+问题5：
+有些场景下，对osd进行一些操作，但是并不想要集群进行数据恢复，此时，可以通过设置noout标志来实现：
+[root@node3 ~]# ceph osd set noout
+noout is set
+[root@node3 ~]# ceph -s
+  cluster:
+    id:     b8b4aa68-d825-43e9-a60a-781c92fec20e
+    health: HEALTH_WARN
+            noout flag(s) set
+ 
+  services:
+    mon: 1 daemons, quorum node1
+    mgr: node1(active)
+    osd: 6 osds: 6 up, 6 in
+         flags noout
+ 
+  data:
+    pools:   0 pools, 0 pgs
+    objects: 0 objects, 0 bytes
+    usage:   6339 MB used, 55100 MB / 61440 MB avail
+    pgs:     去除noout标志命令：
+[root@node3 ~]# ceph osd unset noout
+noout is unset
+[root@node3 ~]# ceph -s
+  cluster:
+    id:     b8b4aa68-d825-43e9-a60a-781c92fec20e
+    health: HEALTH_OK
+ 
+  services:
+    mon: 1 daemons, quorum node1
+    mgr: node1(active)
+    osd: 6 osds: 6 up, 6 in
+ 
+  data:
+    pools:   0 pools, 0 pgs
+    objects: 0 objects, 0 bytes
+    usage:   6339 MB used, 55100 MB / 61440 MB avail
+    pgs:     
+ 
+ 
+
+
+
+
+==================================================
+
+Error: Package: 2:librbd1-12.2.12-0.el7.x86_64 (Ceph)            
+   Requires: liblttng-ust.so.0()(64bit
+
+方法1
+sudo yum install -y yum-utils && sudo yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/7/x86_64/ &&sudo  yum install --nogpgcheck -y epel-release &&sudo  rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7 &&sudo  rm -f /etc/yum.repos.d/dl.fedoraproject.org*
+
+方法二：
+yum install epel-release   -y
+ 
+wget https://dl.fedoraproject.org/pub/epel/7/x86_64/Packages/e/epel-release-7-12.noarch.rpm
+ 
+rpm -Uvh epel-release*rpm
+ 
+yum install lttng-ust -y
+```
+
